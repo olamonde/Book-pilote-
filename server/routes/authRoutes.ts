@@ -134,7 +134,7 @@ authRouter.post('/forgot-password', async (req: Request, res: Response, next: Ne
   }
 });
 
-// Optional: Profile update (e.g. onboarding completion or settings) for authenticated session
+// Profile update (e.g. settings or onboarding) strictly scoped to current authenticated user
 authRouter.patch('/profile', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const sessionId = req.cookies?.[SESSION_COOKIE_NAME];
@@ -156,14 +156,38 @@ authRouter.patch('/profile', async (req: Request, res: Response, next: NextFunct
       });
     }
 
-    const allowedUpdates = ['name', 'avatar', 'hasCompletedOnboarding', 'interfaceLanguage', 'defaultContentLanguage'];
     const partial: Record<string, any> = {};
-    for (const key of allowedUpdates) {
-      if (req.body && req.body[key] !== undefined) {
-        partial[key] = req.body[key];
+    const body = req.body || {};
+
+    // Validate name (string, 1-80 chars)
+    if (typeof body.name === 'string') {
+      const cleanName = body.name.trim();
+      if (cleanName.length > 0 && cleanName.length <= 80) {
+        partial.name = cleanName;
       }
     }
 
+    // Validate avatar (string, URL format or data URL, max 500 chars)
+    if (typeof body.avatar === 'string' && body.avatar.length <= 500) {
+      partial.avatar = body.avatar.trim();
+    }
+
+    // Validate onboarding (boolean)
+    if (typeof body.hasCompletedOnboarding === 'boolean') {
+      partial.hasCompletedOnboarding = body.hasCompletedOnboarding;
+    }
+
+    // Validate interfaceLanguage ('fr' | 'en' | 'es' | 'pt')
+    if (['fr', 'en', 'es', 'pt'].includes(body.interfaceLanguage)) {
+      partial.interfaceLanguage = body.interfaceLanguage;
+    }
+
+    // Validate defaultContentLanguage (string, max 30 chars)
+    if (typeof body.defaultContentLanguage === 'string' && body.defaultContentLanguage.length <= 30) {
+      partial.defaultContentLanguage = body.defaultContentLanguage.trim();
+    }
+
+    // Prevent tampering with plan, billingCycle, aiGenerationsLimit or quotas via /profile
     const updated = await authService.updateUserProfile(currentUser.id, partial);
     return res.json({
       success: true,
