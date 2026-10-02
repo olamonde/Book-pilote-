@@ -1,0 +1,10 @@
+{
+  "name": "Book Pilot",
+  "description": "AI Ebook Studio - Turn your idea into a complete, structured, beautifully illustrated and exportable e-book.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
