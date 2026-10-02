@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Compass, X, Mail, Lock, User as UserIcon, ArrowRight, CheckCircle2, ShieldCheck, Chrome, Sparkles } from 'lucide-react';
+import { Compass, X, Mail, Lock, User as UserIcon, ArrowRight, CheckCircle2, AlertCircle, Sparkles } from 'lucide-react';
 import { User } from '../../types';
+import { AuthService } from '../../services/authService';
 import { StorageService } from '../../services/storageService';
 import { useTranslation } from '../../i18n';
 
@@ -20,7 +21,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   promptContext
 }) => {
   const { t } = useTranslation();
-  const [mode, setMode] = useState<'login' | 'signup' | 'forgot' | 'reset-sent' | 'email-verify'>(
+  const [mode, setMode] = useState<'login' | 'signup' | 'forgot' | 'reset-sent'>(
     initialMode
   );
   const [email, setEmail] = useState('');
@@ -28,11 +29,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [name, setName] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [googleNotice, setGoogleNotice] = useState<string | null>(null);
 
   useEffect(() => {
     if (isOpen) {
       setMode(initialMode);
       setError(null);
+      setGoogleNotice(null);
     }
   }, [isOpen, initialMode]);
 
@@ -41,37 +44,67 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    setGoogleNotice(null);
+
+    if (mode === 'forgot') {
+      if (!email.trim()) {
+        setError(t('auth.requiredFieldsError') || 'Veuillez saisir votre adresse email.');
+        return;
+      }
+      setIsLoading(true);
+      try {
+        await AuthService.forgotPassword(email.trim());
+        setMode('reset-sent');
+      } catch (err: any) {
+        setError(err.message || 'Une erreur est survenue.');
+      } finally {
+        setIsLoading(false);
+      }
+      return;
+    }
+
+    if (!email.trim() || !password) {
+      setError(t('auth.requiredFieldsError') || 'Veuillez remplir tous les champs obligatoires.');
+      return;
+    }
+
+    if (mode === 'signup' && password.length < 8) {
+      setError('Le mot de passe doit comporter au moins 8 caractères.');
+      return;
+    }
+
     setIsLoading(true);
 
-    // Simulate authentication processing
-    setTimeout(() => {
-      setIsLoading(false);
-
-      if (mode === 'forgot') {
-        setMode('reset-sent');
-        return;
+    try {
+      let authenticatedUser: User;
+      if (mode === 'signup') {
+        const res = await AuthService.register({
+          email: email.trim(),
+          password,
+          name: name.trim() || undefined
+        });
+        authenticatedUser = res.user;
+      } else {
+        const res = await AuthService.login({
+          email: email.trim(),
+          password
+        });
+        authenticatedUser = res.user;
       }
 
-      if (!email || !password) {
-        setError(t('auth.requiredFieldsError'));
-        return;
-      }
-
-      // Successful auth with stable user profile
-      const authenticatedUser = StorageService.findOrCreateUser(email, name);
+      // Synchronize in-memory/fallback cache for offline continuity
+      StorageService.setCurrentUser(authenticatedUser);
       onSuccess(authenticatedUser);
       onClose();
-    }, 600);
+    } catch (err: any) {
+      setError(err?.message || 'Une erreur est survenue lors de la connexion.');
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  const handleGoogleSignIn = () => {
-    setIsLoading(true);
-    setTimeout(() => {
-      setIsLoading(false);
-      const googleUser = StorageService.findOrCreateUser('alex.rivera@gmail.com', 'Alex Rivera');
-      onSuccess(googleUser);
-      onClose();
-    }, 500);
+  const handleGoogleSignInClick = () => {
+    setGoogleNotice('La connexion Google OAuth sera configurée prochainement. Veuillez utiliser votre adresse email et un mot de passe.');
   };
 
   return (
@@ -138,7 +171,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           <div className="flex rounded-xl bg-slate-950/80 p-1 border border-white/10 mb-5">
             <button
               type="button"
-              onClick={() => setMode('signup')}
+              onClick={() => {
+                setMode('signup');
+                setError(null);
+                setGoogleNotice(null);
+              }}
               className={`flex-1 py-2 text-xs font-semibold rounded-lg transition-all ${
                 mode === 'signup'
                   ? 'bg-purple-600 text-white shadow-md'
@@ -149,7 +186,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             </button>
             <button
               type="button"
-              onClick={() => setMode('login')}
+              onClick={() => {
+                setMode('login');
+                setError(null);
+                setGoogleNotice(null);
+              }}
               className={`flex-1 py-2 text-xs font-semibold rounded-lg transition-all ${
                 mode === 'login'
                   ? 'bg-purple-600 text-white shadow-md'
@@ -163,7 +204,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
         {error && (
           <div className="mb-4 p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
             <span>{error}</span>
+          </div>
+        )}
+
+        {googleNotice && (
+          <div className="mb-4 p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
+            <span>{googleNotice}</span>
           </div>
         )}
 
@@ -177,7 +226,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               {t('auth.resetSentMessage')}
             </p>
             <button
-              onClick={() => setMode('login')}
+              onClick={() => {
+                setMode('login');
+                setError(null);
+              }}
               className="w-full py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-medium text-xs transition"
             >
               {t('auth.backToLogin')}
@@ -228,7 +280,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   {mode === 'login' && (
                     <button
                       type="button"
-                      onClick={() => setMode('forgot')}
+                      onClick={() => {
+                        setMode('forgot');
+                        setError(null);
+                        setGoogleNotice(null);
+                      }}
                       className="text-[11px] text-purple-400 hover:text-purple-300 transition"
                     >
                       {t('auth.forgotPasswordLink')}
@@ -242,12 +298,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <input
                     type="password"
                     required
+                    minLength={mode === 'signup' ? 8 : 1}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder="••••••••••••"
                     className="w-full pl-9 pr-3 py-2.5 bg-slate-950 border border-white/10 rounded-xl text-white placeholder-slate-500 text-xs focus:ring-1 focus:ring-purple-500 focus:outline-hidden"
                   />
                 </div>
+                {mode === 'signup' && (
+                  <p className="mt-1 text-[11px] text-slate-500">Au moins 8 caractères</p>
+                )}
               </div>
             )}
 
@@ -285,11 +345,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 <button
                   id="google-signin-btn"
                   type="button"
-                  onClick={handleGoogleSignIn}
-                  disabled={isLoading}
-                  className="w-full py-2.5 px-4 rounded-xl bg-white/5 hover:bg-white/10 text-white font-medium text-xs border border-white/10 transition flex items-center justify-center gap-2.5"
+                  onClick={handleGoogleSignInClick}
+                  className="w-full py-2.5 px-4 rounded-xl bg-white/5 hover:bg-white/10 text-white/80 hover:text-white font-medium text-xs border border-white/10 transition flex items-center justify-center gap-2.5 cursor-pointer"
+                  title="La connexion Google OAuth sera configurée prochainement"
                 >
-                  <svg className="w-4 h-4" viewBox="0 0 24 24">
+                  <svg className="w-4 h-4 opacity-75" viewBox="0 0 24 24">
                     <path
                       fill="#EA4335"
                       d="M12 5c1.6 0 3 .6 4.1 1.7l3.1-3.1C17.3 1.8 14.8 1 12 1 7.4 1 3.5 3.6 1.6 7.3l3.7 2.9C6.2 7.3 8.9 5 12 5z"
@@ -307,7 +367,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                       d="M12 24c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3.1 0-5.8-2.3-6.7-5.2L1.6 17c1.9 3.7 5.8 7 10.4 7z"
                     />
                   </svg>
-                  <span>{t('auth.googleSignIn')}</span>
+                  <span>{t('auth.googleSignIn')} (Bientôt disponible)</span>
                 </button>
               </>
             )}
@@ -318,7 +378,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   {t('auth.noAccount')}{' '}
                   <button
                     type="button"
-                    onClick={() => setMode('signup')}
+                    onClick={() => {
+                      setMode('signup');
+                      setError(null);
+                      setGoogleNotice(null);
+                    }}
                     className="text-purple-400 hover:text-purple-300 font-semibold"
                   >
                     {t('auth.signupPrompt')}
@@ -329,7 +393,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   {t('auth.haveAccount')}{' '}
                   <button
                     type="button"
-                    onClick={() => setMode('login')}
+                    onClick={() => {
+                      setMode('login');
+                      setError(null);
+                      setGoogleNotice(null);
+                    }}
                     className="text-purple-400 hover:text-purple-300 font-semibold"
                   >
                     {t('auth.loginPrompt')}

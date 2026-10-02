@@ -53,6 +53,10 @@ export const PLAN_LIMITS: Record<Plan, PlanLimits> = {
 };
 
 export class StorageService {
+  /**
+   * @deprecated Identity and authentication are now handled server-side via AuthService and /api/auth.
+   * Kept only for backward compatibility with local mocks or fallback.
+   */
   static findOrCreateUser(email: string, name?: string): User {
     const cleanEmail = email.toLowerCase().trim();
     const stableId = `user_${cleanEmail.replace(/[^a-zA-Z0-9]/g, '_')}`;

@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
+import { Compass } from 'lucide-react';
 import { ViewRoute, User, Book, ToastNotification, Plan, CoverConfig } from './types';
 import { StorageService } from './services/storageService';
+import { AuthService } from './services/authService';
 import { AIService, BookConcept, OutlineItem } from './services/aiService';
 
 // Common Components
@@ -39,8 +41,9 @@ export default function App() {
   // Navigation Route
   const [currentRoute, setCurrentRoute] = useState<ViewRoute>('landing');
 
-  // Active User & Authentication
-  const [user, setUser] = useState<User | null>(() => StorageService.getCurrentUser());
+  // Active User & Authentication (verified via server session /api/auth/me)
+  const [authLoading, setAuthLoading] = useState(true);
+  const [user, setUser] = useState<User | null>(null);
   const [authModal, setAuthModal] = useState<{
     isOpen: boolean;
     mode: 'login' | 'signup' | 'forgot';
@@ -54,15 +57,46 @@ export default function App() {
   const [legalModalType, setLegalModalType] = useState<'privacy' | 'terms' | 'cookies' | 'refund' | null>(null);
 
   // Books State (strictly scoped to authenticated user)
-  const [books, setBooks] = useState<Book[]>(() => {
-    const currentUser = StorageService.getCurrentUser();
-    return currentUser ? StorageService.getBooks(currentUser.id) : [];
-  });
-  const [currentBook, setCurrentBook] = useState<Book | null>(() => {
-    const currentUser = StorageService.getCurrentUser();
-    const list = currentUser ? StorageService.getBooks(currentUser.id) : [];
-    return list.length > 0 ? list[0] : null;
-  });
+  const [books, setBooks] = useState<Book[]>([]);
+  const [currentBook, setCurrentBook] = useState<Book | null>(null);
+
+  // Initial Server Session Verification on App Startup
+  useEffect(() => {
+    let isMounted = true;
+    async function verifySession() {
+      try {
+        const currentUser = await AuthService.getCurrentUser();
+        if (isMounted) {
+          if (currentUser) {
+            setUser(currentUser);
+            StorageService.setCurrentUser(currentUser);
+            const userBooks = StorageService.getBooks(currentUser.id);
+            setBooks(userBooks);
+            setCurrentBook(userBooks.length > 0 ? userBooks[0] : null);
+          } else {
+            setUser(null);
+            StorageService.setCurrentUser(null);
+            setBooks([]);
+            setCurrentBook(null);
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to verify session on startup:', err);
+        if (isMounted) {
+          setUser(null);
+        }
+      } finally {
+        if (isMounted) {
+          setAuthLoading(false);
+        }
+      }
+    }
+
+    verifySession();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   // Keep books strictly synchronized with current logged-in user
   useEffect(() => {
@@ -150,7 +184,7 @@ export default function App() {
     }
   };
 
-  const handleOnboardingComplete = (selectedPlan: Plan) => {
+  const handleOnboardingComplete = async (selectedPlan: Plan) => {
     setOnboardingOpen(false);
     if (user) {
       const limits: Record<Plan, number> = {
@@ -166,6 +200,7 @@ export default function App() {
       };
       setUser(updatedUser);
       StorageService.setCurrentUser(updatedUser);
+      AuthService.updateProfile({ hasCompletedOnboarding: true }).catch(() => {});
 
       if (initialPromptFromHero) {
         navigate('create');
@@ -177,7 +212,12 @@ export default function App() {
     }
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await AuthService.logout();
+    } catch (e) {
+      console.warn('Logout error:', e);
+    }
     StorageService.setCurrentUser(null);
     setUser(null);
     setBooks([]);
@@ -335,6 +375,22 @@ export default function App() {
     'settings',
     'billing'
   ].includes(currentRoute);
+
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-[#050505] flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-12 h-12 rounded-2xl bg-purple-600/10 border border-purple-500/20 text-purple-400 flex items-center justify-center animate-pulse">
+            <Compass className="w-6 h-6 animate-spin" style={{ animationDuration: '3s' }} />
+          </div>
+          <div className="flex items-center gap-2 text-xs text-slate-400 font-mono">
+            <div className="w-2 h-2 rounded-full bg-purple-500 animate-ping" />
+            <span>Book Pilot Studio...</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#050505] text-[#F9FAFB] selection:bg-[#7C3AED] selection:text-white font-sans antialiased">
@@ -501,6 +557,11 @@ export default function App() {
                   onUpdateUser={(updated) => {
                     setUser(updated);
                     StorageService.setCurrentUser(updated);
+                    AuthService.updateProfile({
+                      name: updated.name,
+                      defaultContentLanguage: updated.defaultContentLanguage,
+                      interfaceLanguage: updated.interfaceLanguage
+                    }).catch(() => {});
                   }}
                   onShowToast={addToast}
                 />

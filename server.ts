@@ -1,9 +1,11 @@
 import express from "express";
+import cookieParser from "cookie-parser";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
 import { jsonrepair } from "jsonrepair";
+import { authRouter } from "./server/routes/authRoutes";
 import { analyzeImagePrompt, buildTailoredSvgPrompt, buildNeutralImagePrompt } from "./src/services/imagePromptService";
 import {
   TEXT_GENERATION_PROVIDER,
@@ -125,6 +127,10 @@ async function startServer() {
   const PORT = 3000;
 
   app.use(express.json({ limit: "25mb" }));
+  app.use(cookieParser());
+
+  // Mount real authentication routes
+  app.use("/api/auth", authRouter);
 
   // API routes FIRST
   app.get("/api/health", (req, res) => {
