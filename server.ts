@@ -6,6 +6,22 @@ import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
 import { jsonrepair } from "jsonrepair";
 import { authRouter } from "./server/routes/authRoutes";
+import { bookRouter } from "./server/routes/bookRoutes";
+import { requireAuth } from "./server/middleware/auth";
+import { QuotaService } from "./server/services/quotaService";
+import { AuthorizationService } from "./server/services/authorizationService";
+import { aiRateLimiter } from "./server/middleware/rateLimiter";
+import {
+  BookConceptSchema,
+  GenerateOutlineSchema,
+  GenerateChapterSchema,
+  GenerateChaptersBatchSchema,
+  CopilotTransformSchema,
+  CoverChatInterpretSchema,
+  GenerateCoverImageSchema,
+  TranscribeAudioSchema,
+  ExportBookSchema
+} from "./server/validation/apiSchemas";
 import { analyzeImagePrompt, buildTailoredSvgPrompt, buildNeutralImagePrompt } from "./src/services/imagePromptService";
 import {
   TEXT_GENERATION_PROVIDER,
@@ -19,6 +35,7 @@ import {
   formatExportFilename,
   getMimeTypeForFormat
 } from "./src/services/bookExportEngine";
+import { Book, ExportOptions } from "./src/types";
 
 // Internal SVG Sanitizer for generated covers
 function sanitizeCoverSvg(rawSvg: string): string {
@@ -126,11 +143,19 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  app.use(express.json({ limit: "25mb" }));
+  // Tailored JSON body limits: standard 1MB for general routes, with larger 25MB permitted for audio transcription and book exports
+  app.use((req, res, next) => {
+    const isLargePayloadRoute = req.path === '/api/transcribe-audio' || req.path === '/api/export-book' || req.path.startsWith('/api/books');
+    const limit = isLargePayloadRoute ? '25mb' : '1mb';
+    express.json({ limit })(req, res, next);
+  });
   app.use(cookieParser());
 
   // Mount real authentication routes
   app.use("/api/auth", authRouter);
+
+  // Mount real book storage routes (strictly scoped to authenticated session)
+  app.use("/api/books", bookRouter);
 
   // API routes FIRST
   app.get("/api/health", (req, res) => {
@@ -355,19 +380,32 @@ async function startServer() {
   }
 
   // 1. Endpoint: Generate Book Concept
-  app.post("/api/generate-book-concept", async (req, res) => {
-    const { idea, language, bookType, tone, length, targetAudience, author, customInstructions } = req.body || {};
-
-    if (!idea || typeof idea !== "string" || !idea.trim()) {
+  app.post("/api/generate-book-concept", requireAuth, aiRateLimiter, async (req, res) => {
+    const parseResult = BookConceptSchema.safeParse(req.body);
+    if (!parseResult.success) {
       return res.status(400).json({
         success: false,
-        error: "IDEA_REQUIRED",
-        message: "Une idée de livre est requise."
+        error: "VALIDATION_ERROR",
+        message: parseResult.error.issues[0]?.message || "Données du concept invalides."
+      });
+    }
+
+    const { idea, language, bookType, tone, length, targetAudience, author, customInstructions } = parseResult.data;
+
+    // Check and consume 1 AI generation quota atomically in PostgreSQL
+    const quotaResult = await QuotaService.consumeAiGeneration(req.user!.id, 1);
+    if (!quotaResult.allowed) {
+      return res.status(403).json({
+        success: false,
+        error: "AI_QUOTA_EXCEEDED",
+        message: "Votre quota de générations IA est épuisé pour votre formule actuelle.",
+        quota: quotaResult
       });
     }
 
     const apiKey = process.env.GEMINI_API_KEY?.trim();
     if (!apiKey) {
+      await QuotaService.refundAiGeneration(req.user!.id, 1);
       return res.status(503).json({
         success: false,
         error: "SERVICE_UNAVAILABLE",
@@ -490,6 +528,10 @@ ${customInstructions ? `- Consignes personnalisées de l'auteur : ${customInstru
       });
     } catch (err: any) {
       console.error("[AI Engine] Concept generation error:", err);
+      // Refund quota on definitive AI failure
+      if (req.user?.id) {
+        await QuotaService.refundAiGeneration(req.user.id, 1).catch(() => {});
+      }
       return res.status(500).json({
         success: false,
         error: "GENERATION_FAILED",
@@ -499,19 +541,32 @@ ${customInstructions ? `- Consignes personnalisées de l'auteur : ${customInstru
   });
 
   // 2. Endpoint: Generate Outline (Table of Contents)
-  app.post("/api/generate-outline", async (req, res) => {
-    const { concept, options } = req.body || {};
-
-    if (!concept || !concept.title) {
+  app.post("/api/generate-outline", requireAuth, aiRateLimiter, async (req, res) => {
+    const parseResult = GenerateOutlineSchema.safeParse(req.body);
+    if (!parseResult.success) {
       return res.status(400).json({
         success: false,
-        error: "CONCEPT_REQUIRED",
-        message: "Les données du concept de livre sont requises."
+        error: "VALIDATION_ERROR",
+        message: parseResult.error.issues[0]?.message || "Données du plan invalides."
+      });
+    }
+
+    const { concept, options } = parseResult.data;
+
+    // Check and consume 1 AI generation quota atomically in PostgreSQL
+    const quotaResult = await QuotaService.consumeAiGeneration(req.user!.id, 1);
+    if (!quotaResult.allowed) {
+      return res.status(403).json({
+        success: false,
+        error: "AI_QUOTA_EXCEEDED",
+        message: "Votre quota de générations IA est épuisé pour votre formule actuelle.",
+        quota: quotaResult
       });
     }
 
     const apiKey = process.env.GEMINI_API_KEY?.trim();
     if (!apiKey) {
+      await QuotaService.refundAiGeneration(req.user!.id, 1);
       return res.status(503).json({
         success: false,
         error: "SERVICE_UNAVAILABLE",
@@ -642,7 +697,16 @@ ${options?.customInstructions ? `- Directives complémentaires : ${options.custo
   });
 
   // 3. Endpoint: Generate Full Chapter Content (Independent & Context-Aware)
-  app.post("/api/generate-chapter", async (req, res) => {
+  app.post("/api/generate-chapter", requireAuth, aiRateLimiter, async (req, res) => {
+    const parseResult = GenerateChapterSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      return res.status(400).json({
+        success: false,
+        error: "VALIDATION_ERROR",
+        message: parseResult.error.issues[0]?.message || "Données du chapitre invalides."
+      });
+    }
+
     const {
       bookConcept,
       outlineItem,
@@ -652,18 +716,22 @@ ${options?.customInstructions ? `- Directives complémentaires : ${options.custo
       language,
       fullOutline,
       totalChapters: paramTotalChapters
-    } = req.body || {};
+    } = parseResult.data;
 
-    if (!bookConcept || !outlineItem) {
-      return res.status(400).json({
+    // Check and consume 1 AI generation quota atomically in PostgreSQL
+    const quotaResult = await QuotaService.consumeAiGeneration(req.user!.id, 1);
+    if (!quotaResult.allowed) {
+      return res.status(403).json({
         success: false,
-        error: "MISSING_DATA",
-        message: "Les informations du chapitre et du concept sont requises."
+        error: "AI_QUOTA_EXCEEDED",
+        message: "Votre quota de générations IA est épuisé pour votre formule actuelle.",
+        quota: quotaResult
       });
     }
 
     const apiKey = process.env.GEMINI_API_KEY?.trim();
     if (!apiKey) {
+      await QuotaService.refundAiGeneration(req.user!.id, 1);
       return res.status(503).json({
         success: false,
         error: "SERVICE_UNAVAILABLE",
@@ -754,6 +822,9 @@ Rédige maintenant le contenu intégral et riche de ce chapitre en Markdown.`;
       });
     } catch (err: any) {
       console.error("[AI Engine] Chapter generation error:", err);
+      if (req.user?.id) {
+        await QuotaService.refundAiGeneration(req.user.id, 1).catch(() => {});
+      }
       return res.status(500).json({
         success: false,
         error: "GENERATION_FAILED",
@@ -763,19 +834,42 @@ Rédige maintenant le contenu intégral et riche de ce chapitre en Markdown.`;
   });
 
   // 4. Endpoint: Batch Chapter Generation (Fast Parallel Concurrency)
-  app.post("/api/generate-chapters-batch", async (req, res) => {
-    const { bookConcept, outline, customInstructions, language, concurrency = 2 } = req.body || {};
-
-    if (!bookConcept || !Array.isArray(outline) || outline.length === 0) {
+  app.post("/api/generate-chapters-batch", requireAuth, aiRateLimiter, async (req, res) => {
+    const parseResult = GenerateChaptersBatchSchema.safeParse(req.body);
+    if (!parseResult.success) {
       return res.status(400).json({
         success: false,
-        error: "MISSING_DATA",
-        message: "Le concept et le plan de l'e-book sont requis."
+        error: "VALIDATION_ERROR",
+        message: parseResult.error.issues[0]?.message || "Données du lot invalides."
+      });
+    }
+
+    const { bookConcept, outline, customInstructions, language, concurrency = 2 } = parseResult.data;
+    const totalChapters = outline.length;
+
+    // Plan check: Batch generation is a Creator / Pro feature
+    if (!AuthorizationService.isBatchGenerationAllowed(req.user!)) {
+      return res.status(403).json({
+        success: false,
+        error: "FEATURE_NOT_AVAILABLE",
+        message: "La génération par lots accélérée est réservée aux formules Creator et Professionnel."
+      });
+    }
+
+    // Atomically reserve quota units for the entire batch
+    const quotaResult = await QuotaService.consumeAiGeneration(req.user!.id, totalChapters);
+    if (!quotaResult.allowed) {
+      return res.status(403).json({
+        success: false,
+        error: "AI_QUOTA_EXCEEDED",
+        message: `Votre quota est insuffisant pour générer ${totalChapters} chapitres en lot (${quotaResult.remaining} restante(s)).`,
+        quota: quotaResult
       });
     }
 
     const apiKey = process.env.GEMINI_API_KEY?.trim();
     if (!apiKey) {
+      await QuotaService.refundAiGeneration(req.user!.id, totalChapters);
       return res.status(503).json({
         success: false,
         error: "SERVICE_UNAVAILABLE",
@@ -783,8 +877,9 @@ Rédige maintenant le contenu intégral et riche de ce chapitre en Markdown.`;
       });
     }
 
+    let successfulCount = 0;
+
     try {
-      const totalChapters = outline.length;
       const requestedLang = language || "Français";
       const results: any[] = new Array(totalChapters);
 
@@ -822,6 +917,7 @@ Rédige maintenant le contenu intégral et riche de ce chapitre en Markdown.`;
               status: "ready",
               summary
             };
+            successfulCount++;
           })
         );
       }
@@ -832,6 +928,11 @@ Rédige maintenant le contenu intégral et riche de ce chapitre en Markdown.`;
       });
     } catch (err: any) {
       console.error("[AI Engine] Batch chapters error:", err);
+      // Refund the chapters that failed to generate
+      const failedCount = totalChapters - successfulCount;
+      if (failedCount > 0 && req.user?.id) {
+        await QuotaService.refundAiGeneration(req.user.id, failedCount).catch(() => {});
+      }
       return res.status(500).json({
         success: false,
         error: "BATCH_GENERATION_FAILED",
@@ -841,27 +942,41 @@ Rédige maintenant le contenu intégral et riche de ce chapitre en Markdown.`;
   });
 
   // 5. Endpoint: Copilot Text Transformations & Rewriting
-  app.post("/api/copilot-transform", async (req, res) => {
-    const { text, instruction, chapterTitle, language } = req.body || {};
-
-    if (!text || typeof text !== "string" || !text.trim()) {
+  app.post("/api/copilot-transform", requireAuth, aiRateLimiter, async (req, res) => {
+    const parseResult = CopilotTransformSchema.safeParse(req.body);
+    if (!parseResult.success) {
       return res.status(400).json({
         success: false,
-        error: "TEXT_REQUIRED",
-        message: "Veuillez fournir le texte à modifier."
+        error: "VALIDATION_ERROR",
+        message: parseResult.error.issues[0]?.message || "Données de transformation invalides."
       });
     }
 
-    if (!instruction || typeof instruction !== "string" || !instruction.trim()) {
-      return res.status(400).json({
+    const { text, instruction, chapterTitle, language } = parseResult.data;
+
+    // Check Plan permission: Copilot requires Creator or Pro plan
+    if (!AuthorizationService.isCopilotAllowed(req.user!)) {
+      return res.status(403).json({
         success: false,
-        error: "INSTRUCTION_REQUIRED",
-        message: "Une consigne d'édition est requise."
+        error: "FEATURE_NOT_AVAILABLE",
+        message: "Le Copilote IA d'édition est une fonctionnalité exclusive aux formules Creator et Professionnel."
+      });
+    }
+
+    // Atomically consume 1 AI generation quota
+    const quotaResult = await QuotaService.consumeAiGeneration(req.user!.id, 1);
+    if (!quotaResult.allowed) {
+      return res.status(403).json({
+        success: false,
+        error: "AI_QUOTA_EXCEEDED",
+        message: "Votre quota de générations IA est épuisé pour votre formule actuelle.",
+        quota: quotaResult
       });
     }
 
     const apiKey = process.env.GEMINI_API_KEY?.trim();
     if (!apiKey) {
+      await QuotaService.refundAiGeneration(req.user!.id, 1);
       return res.status(503).json({
         success: false,
         error: "SERVICE_UNAVAILABLE",
@@ -910,6 +1025,9 @@ ${text.trim()}
       });
     } catch (err: any) {
       console.error("[AI Engine] Copilot transformation error:", err);
+      if (req.user?.id) {
+        await QuotaService.refundAiGeneration(req.user.id, 1).catch(() => {});
+      }
       return res.status(500).json({
         success: false,
         error: "TRANSFORMATION_FAILED",
@@ -919,7 +1037,16 @@ ${text.trim()}
   });
 
   // 5b. Endpoint: Conversational Cover Director (Contextual State & Intent Interpretation)
-  app.post("/api/cover-chat/interpret", async (req, res) => {
+  app.post("/api/cover-chat/interpret", requireAuth, aiRateLimiter, async (req, res) => {
+    const parseResult = CoverChatInterpretSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      return res.status(400).json({
+        success: false,
+        error: "VALIDATION_ERROR",
+        message: parseResult.error.issues[0]?.message || "Données invalides."
+      });
+    }
+
     const {
       message,
       bookContext,
@@ -929,15 +1056,7 @@ ${text.trim()}
       conversationHistory,
       currentCover,
       interfaceLanguage
-    } = req.body || {};
-
-    if (!message || typeof message !== "string" || !message.trim()) {
-      return res.status(400).json({
-        success: false,
-        error: "MESSAGE_REQUIRED",
-        message: "Un message est requis pour interagir avec Book Pilot AI."
-      });
-    }
+    } = parseResult.data;
 
     const apiKey = process.env.GEMINI_API_KEY?.trim();
     if (!apiKey) {
@@ -1094,13 +1213,27 @@ NOUVEAU MESSAGE DE L'AUTEUR :
   // Architecture prepared for Gemini Nano Banana.
   // TEXT_GENERATION_PROVIDER: Google Gemini (gemini-3.5-flash-lite / gemini-3.1-flash-lite)
   // IMAGE_GENERATION_PROVIDER: Gemini Nano Banana (En attente de connexion API)
-  app.post("/api/generate-cover-image", async (req, res) => {
-    const { prompt, style, format, mode, bookContext, userPlan } = req.body || {};
-    if (!prompt || typeof prompt !== "string" || !prompt.trim()) {
+  app.post("/api/generate-cover-image", requireAuth, aiRateLimiter, async (req, res) => {
+    const parseResult = GenerateCoverImageSchema.safeParse(req.body);
+    if (!parseResult.success) {
       return res.status(400).json({
         success: false,
-        error: "PROMPT_REQUIRED",
-        message: "Une description est requise pour concevoir l'image."
+        error: "VALIDATION_ERROR",
+        message: parseResult.error.issues[0]?.message || "Données d'image invalides."
+      });
+    }
+
+    const { prompt, style, format } = parseResult.data;
+    const { mode, bookContext } = req.body || {};
+
+    // Check and consume 1 AI generation quota atomically
+    const quotaResult = await QuotaService.consumeAiGeneration(req.user!.id, 1);
+    if (!quotaResult.allowed) {
+      return res.status(403).json({
+        success: false,
+        error: "AI_QUOTA_EXCEEDED",
+        message: "Votre quota de générations IA est épuisé pour votre formule actuelle.",
+        quota: quotaResult
       });
     }
 
@@ -1108,9 +1241,9 @@ NOUVEAU MESSAGE DE L'AUTEUR :
       const result = await executeImageGeneration({
         prompt: prompt.trim(),
         style: typeof style === "string" ? style : undefined,
-        format,
+        format: format as any,
         mode,
-        userPlan,
+        userPlan: req.user!.plan, // SERVER-AUTHORITATIVE: userPlan comes from req.user!.plan
         bookContext
       });
 
@@ -1120,6 +1253,10 @@ NOUVEAU MESSAGE DE L'AUTEUR :
       });
     } catch (err: any) {
       console.log("[Image Engine] Generation status:", err?.message || err);
+      // Refund quota on failure
+      if (req.user?.id) {
+        await QuotaService.refundAiGeneration(req.user.id, 1).catch(() => {});
+      }
       const status = typeof err.status === "number" ? err.status : 503;
       return res.status(status).json({
         success: false,
@@ -1132,13 +1269,27 @@ NOUVEAU MESSAGE DE L'AUTEUR :
   });
 
   // Alias /api/generate-image for direct image creation
-  app.post("/api/generate-image", async (req, res) => {
-    const { prompt, style, format, mode = "image", bookContext, userPlan } = req.body || {};
-    if (!prompt || typeof prompt !== "string" || !prompt.trim()) {
+  app.post("/api/generate-image", requireAuth, aiRateLimiter, async (req, res) => {
+    const parseResult = GenerateCoverImageSchema.safeParse(req.body);
+    if (!parseResult.success) {
       return res.status(400).json({
         success: false,
-        error: "PROMPT_REQUIRED",
-        message: "Une description est requise pour concevoir l'image."
+        error: "VALIDATION_ERROR",
+        message: parseResult.error.issues[0]?.message || "Données d'image invalides."
+      });
+    }
+
+    const { prompt, style, format } = parseResult.data;
+    const { mode = "image", bookContext } = req.body || {};
+
+    // Check and consume 1 AI generation quota atomically
+    const quotaResult = await QuotaService.consumeAiGeneration(req.user!.id, 1);
+    if (!quotaResult.allowed) {
+      return res.status(403).json({
+        success: false,
+        error: "AI_QUOTA_EXCEEDED",
+        message: "Votre quota de générations IA est épuisé pour votre formule actuelle.",
+        quota: quotaResult
       });
     }
 
@@ -1146,9 +1297,9 @@ NOUVEAU MESSAGE DE L'AUTEUR :
       const result = await executeImageGeneration({
         prompt: prompt.trim(),
         style: typeof style === "string" ? style : undefined,
-        format,
+        format: format as any,
         mode,
-        userPlan,
+        userPlan: req.user!.plan, // SERVER-AUTHORITATIVE
         bookContext
       });
 
@@ -1157,7 +1308,10 @@ NOUVEAU MESSAGE DE L'AUTEUR :
         ...result
       });
     } catch (err: any) {
-      console.log("[Image Engine] Generate image status:", err?.message || err);
+      console.log("[Image Engine] Direct image generation status:", err?.message || err);
+      if (req.user?.id) {
+        await QuotaService.refundAiGeneration(req.user.id, 1).catch(() => {});
+      }
       const status = typeof err.status === "number" ? err.status : 503;
       return res.status(status).json({
         success: false,
@@ -1170,16 +1324,18 @@ NOUVEAU MESSAGE DE L'AUTEUR :
   });
 
   // 7. Endpoint: Audio Transcription (Voice dictation powered by Gemini V2)
-  app.post("/api/transcribe-audio", async (req, res) => {
-    const { audioBase64, mimeType = "audio/webm", language = "fr-FR" } = req.body || {};
-
-    if (!audioBase64 || typeof audioBase64 !== "string") {
+  app.post("/api/transcribe-audio", requireAuth, aiRateLimiter, async (req, res) => {
+    const parseResult = TranscribeAudioSchema.safeParse(req.body);
+    if (!parseResult.success) {
       return res.status(400).json({
         success: false,
-        error: "AUDIO_DATA_REQUIRED",
-        message: "Les données audio sont requises pour la transcription."
+        error: "VALIDATION_ERROR",
+        message: parseResult.error.issues[0]?.message || "Données audio invalides."
       });
     }
+
+    const { audioBase64, mimeType = "audio/webm" } = parseResult.data;
+    const { language = "fr-FR" } = req.body || {};
 
     const apiKey = process.env.GEMINI_API_KEY?.trim();
     if (!apiKey) {
@@ -1267,57 +1423,65 @@ DIRECTIVES STRICTES :
   });
 
   // 8. Endpoint: High-fidelity E-book Export (PDF, DOCX, EPUB, TXT, MD, HTML)
-  app.post("/api/export-book", async (req, res) => {
+  app.post("/api/export-book", requireAuth, async (req, res) => {
     try {
-      const { book, options } = req.body || {};
-      if (!book || typeof book !== "object") {
+      const parseResult = ExportBookSchema.safeParse(req.body);
+      if (!parseResult.success) {
         return res.status(400).json({
           success: false,
-          error: "BOOK_DATA_REQUIRED",
-          message: "Les données du livre sont requises pour l'exportation."
+          error: "VALIDATION_ERROR",
+          message: parseResult.error.issues[0]?.message || "Données d'exportation invalides."
         });
       }
 
-      if (!book.title || typeof book.title !== "string" || !book.title.trim()) {
-        return res.status(400).json({
-          success: false,
-          error: "TITLE_REQUIRED",
-          message: "Le livre doit comporter un titre pour pouvoir être exporté."
-        });
-      }
-
-      if (!Array.isArray(book.chapters)) {
-        book.chapters = [];
-      }
-
+      const { book, options } = parseResult.data;
       const format = options?.format || "pdf";
+
+      // Verify that user plan allows this export format
+      if (!AuthorizationService.isExportFormatAllowed(req.user!, format)) {
+        return res.status(403).json({
+          success: false,
+          error: "FEATURE_NOT_AVAILABLE",
+          message: `L'exportation au format ${format.toUpperCase()} n'est pas incluse dans votre formule ${req.user!.plan}.`
+        });
+      }
+
       let buffer: Uint8Array;
       let mimeType = getMimeTypeForFormat(format);
       const filename = formatExportFilename(book.title, format);
 
+      const exportOptions: ExportOptions = {
+        format,
+        includeCover: options?.includeCover ?? true,
+        includeTOC: options?.includeTOC ?? true,
+        includePageNumbers: options?.includePageNumbers ?? true,
+        fontFamily: (options?.fontFamily as any) || "serif",
+        pageSize: (options?.pageSize as any) || "A4"
+      };
+
       switch (format) {
         case "pdf":
-          buffer = await BookExportEngine.generatePdf(book, options);
+          buffer = await BookExportEngine.generatePdf(book as unknown as Book, exportOptions);
           mimeType = "application/pdf";
           break;
         case "docx":
-          buffer = await BookExportEngine.generateDocx(book, options);
+          buffer = await BookExportEngine.generateDocx(book as unknown as Book, exportOptions);
           mimeType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
           break;
         case "epub":
-          buffer = await BookExportEngine.generateEpub(book, options);
+          buffer = await BookExportEngine.generateEpub(book as unknown as Book, exportOptions);
           mimeType = "application/epub+zip";
           break;
         case "txt":
-          buffer = BookExportEngine.generateTxt(book);
+          buffer = BookExportEngine.generateTxt(book as unknown as Book);
           mimeType = "text/plain; charset=utf-8";
           break;
         case "markdown":
-          buffer = BookExportEngine.generateMarkdown(book);
+          buffer = BookExportEngine.generateMarkdown(book as unknown as Book);
           mimeType = "text/markdown; charset=utf-8";
           break;
         case "html":
-          buffer = BookExportEngine.generateHtml(book);
+          buffer = BookExportEngine.generateHtml(book as unknown as Book);
           mimeType = "text/html; charset=utf-8";
           break;
         default:

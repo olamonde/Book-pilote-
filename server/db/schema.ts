@@ -1,4 +1,5 @@
-import { pgTable, text, timestamp, integer, boolean, bigint, index } from 'drizzle-orm/pg-core';
+import { pgTable, text, timestamp, integer, boolean, bigint, index, jsonb } from 'drizzle-orm/pg-core';
+import { CoverConfig, Chapter } from '../../src/types/index.ts';
 
 export const users = pgTable('users', {
   id: text('id').primaryKey(),
@@ -28,7 +29,31 @@ export const sessions = pgTable('sessions', {
   index('sessions_expires_at_idx').on(table.expiresAt)
 ]);
 
+export const books = pgTable('books', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  title: text('title').notNull(),
+  subtitle: text('subtitle').default(''),
+  description: text('description').default(''),
+  author: text('author').default(''),
+  language: text('language').default('Français'),
+  genre: text('genre').default('Guide Pratique'),
+  tone: text('tone').default('Inspirant & Professionnel'),
+  targetAudience: text('target_audience').default('Tout public'),
+  status: text('status').notNull().default('draft'), // 'draft' | 'generating' | 'completed' | 'archived'
+  cover: jsonb('cover').$type<CoverConfig>().notNull(),
+  chapters: jsonb('chapters').$type<Chapter[]>().notNull().default([]),
+  wordCount: integer('word_count').notNull().default(0),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
+}, (table) => [
+  index('books_user_id_idx').on(table.userId),
+  index('books_updated_at_idx').on(table.updatedAt)
+]);
+
 export type UserRow = typeof users.$inferSelect;
 export type NewUserRow = typeof users.$inferInsert;
 export type SessionRow = typeof sessions.$inferSelect;
 export type NewSessionRow = typeof sessions.$inferInsert;
+export type BookRow = typeof books.$inferSelect;
+export type NewBookRow = typeof books.$inferInsert;

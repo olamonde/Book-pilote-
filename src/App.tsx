@@ -258,10 +258,14 @@ export default function App() {
     setBooks(updatedBooks);
     setCurrentBook(bookWithOwner);
 
-    // Track AI generation usage
+    // Sync latest user AI quota and state from server
     if (user) {
-      const updatedUser = StorageService.incrementAiGenerations(user.id);
-      if (updatedUser) setUser(updatedUser);
+      AuthService.getCurrentUser().then((refreshed) => {
+        if (refreshed) {
+          setUser(refreshed);
+          StorageService.setCurrentUser(refreshed);
+        }
+      }).catch(() => {});
     }
 
     addToast(`"${newBook.title}" a été relié et sauvegardé dans votre bibliothèque !`, 'success');
@@ -273,19 +277,35 @@ export default function App() {
     const updatedBooks = StorageService.saveBook(updatedBook, ownerId);
     setBooks(updatedBooks);
     setCurrentBook(updatedBook);
+
+    // Prepare future cloud backup sync silently
+    fetch('/api/books', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(updatedBook)
+    }).catch(() => {});
   };
 
   const handleTrackAiUsage = () => {
     if (user) {
-      const updated = StorageService.incrementAiGenerations(user.id);
-      if (updated) setUser(updated);
+      AuthService.getCurrentUser().then((refreshed) => {
+        if (refreshed) {
+          setUser(refreshed);
+          StorageService.setCurrentUser(refreshed);
+        }
+      }).catch(() => {});
     }
   };
 
   const handleRefundAiUsage = () => {
     if (user) {
-      const updated = StorageService.refundAiGeneration();
-      if (updated) setUser(updated);
+      AuthService.getCurrentUser().then((refreshed) => {
+        if (refreshed) {
+          setUser(refreshed);
+          StorageService.setCurrentUser(refreshed);
+        }
+      }).catch(() => {});
     }
   };
 

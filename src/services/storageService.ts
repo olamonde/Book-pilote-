@@ -168,6 +168,10 @@ export class StorageService {
     }
   }
 
+  /**
+   * @deprecated Server-side PostgreSQL is the source of truth for AI quota consumption.
+   * This is kept as a local mirror for visual counter feedback until next server sync.
+   */
   static incrementAiGenerations(userId?: string): User {
     const user = this.getUser();
     user.aiGenerationsUsed = Math.min(user.aiGenerationsLimit, (user.aiGenerationsUsed || 0) + 1);
@@ -300,11 +304,17 @@ export class StorageService {
     this.saveBook(book);
   }
 
+  /**
+   * @deprecated Server-side PostgreSQL is the source of truth for AI quota consumption.
+   */
   static canConsumeAiGeneration(): boolean {
     const user = this.getUser();
     return (user.aiGenerationsUsed || 0) < user.aiGenerationsLimit;
   }
 
+  /**
+   * @deprecated Server-side PostgreSQL QuotaService handles actual consumption.
+   */
   static consumeAiGeneration(): boolean {
     const user = this.getUser();
     if (user.aiGenerationsUsed >= user.aiGenerationsLimit) {
@@ -315,6 +325,9 @@ export class StorageService {
     return true;
   }
 
+  /**
+   * @deprecated Server-side PostgreSQL QuotaService handles refunds.
+   */
   static refundAiGeneration(): User {
     const user = this.getUser();
     user.aiGenerationsUsed = Math.max(0, (user.aiGenerationsUsed || 0) - 1);
@@ -322,6 +335,9 @@ export class StorageService {
     return user;
   }
 
+  /**
+   * @deprecated Server plan in PostgreSQL is authoritative. Client cannot grant itself paid privileges.
+   */
   static upgradePlan(plan: Plan, cycle: 'monthly' | 'yearly'): User {
     const user = this.getUser();
     const limits = PLAN_LIMITS[plan];
