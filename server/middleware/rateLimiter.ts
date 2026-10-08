@@ -6,16 +6,19 @@ interface RateLimitRecord {
 }
 
 const rateLimitMap = new Map<string, RateLimitRecord>();
+let lastCleanup = Date.now();
 
-// Clean up expired buckets periodically
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, value] of rateLimitMap.entries()) {
-    if (value.resetAt <= now) {
-      rateLimitMap.delete(key);
+// Clean up expired buckets lazily inside request handling to avoid top-level global setInterval
+function maybeCleanupExpired(now: number) {
+  if (now - lastCleanup > 60000 || rateLimitMap.size > 200) {
+    lastCleanup = now;
+    for (const [key, value] of rateLimitMap.entries()) {
+      if (value.resetAt <= now) {
+        rateLimitMap.delete(key);
+      }
     }
   }
-}, 60000);
+}
 
 export function createRateLimiter(options: { windowMs: number; max: number; message?: string }) {
   const { windowMs, max, message = 'Trop de requêtes. Veuillez patienter un instant.' } = options;
@@ -25,6 +28,7 @@ export function createRateLimiter(options: { windowMs: number; max: number; mess
     const identifier = req.user?.id || req.ip || req.socket.remoteAddress || 'unknown';
     const routeKey = `${req.baseUrl || ''}${req.path}:${identifier}`;
     const now = Date.now();
+    maybeCleanupExpired(now);
 
     let record = rateLimitMap.get(routeKey);
     if (!record || record.resetAt <= now) {

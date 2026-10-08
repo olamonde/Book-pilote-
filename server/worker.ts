@@ -1,12 +1,4 @@
-import http from "node:http";
-import { handleAsNodeRequest } from "cloudflare:node";
-import { createBookPilotApp } from "./app";
-
-// Initialize the Express app and register Node HTTP bridge server
-const app = createBookPilotApp();
-const server = http.createServer(app);
-const WORKER_NODE_PORT = 8080;
-server.listen(WORKER_NODE_PORT);
+import { handleApiRequest } from "./apiHandler";
 
 export interface WorkerEnv {
   ASSETS?: {
@@ -32,10 +24,10 @@ export default {
 
     const url = new URL(request.url);
 
-    // 1. API routes: delegate to Node.js Express instance
+    // 1. API routes: natively handled via Web standard Request/Response
     if (url.pathname.startsWith("/api")) {
       try {
-        return await handleAsNodeRequest(request, WORKER_NODE_PORT);
+        return await handleApiRequest(request);
       } catch (err: any) {
         console.error("[Cloudflare Worker API Error]:", err);
         return new Response(

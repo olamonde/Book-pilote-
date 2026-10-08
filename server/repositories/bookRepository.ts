@@ -168,4 +168,78 @@ export class PostgresBookRepository implements IBookRepository {
   }
 }
 
-export const bookRepository: IBookRepository = new PostgresBookRepository();
+export class MemoryBookRepository implements IBookRepository {
+  private books = new Map<string, Book>();
+
+  async createBook(book: Book, userId: string): Promise<Book> {
+    const saved: Book = {
+      ...book,
+      userId,
+      id: book.id || `book-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      createdAt: book.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    this.books.set(`${userId}:${saved.id}`, saved);
+    return saved;
+  }
+
+  async getBookById(bookId: string, userId: string): Promise<Book | null> {
+    return this.books.get(`${userId}:${bookId}`) || null;
+  }
+
+  async getBooksByUserId(userId: string): Promise<Book[]> {
+    const list: Book[] = [];
+    for (const [key, book] of this.books.entries()) {
+      if (key.startsWith(`${userId}:`)) list.push(book);
+    }
+    return list.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+  }
+
+  async updateBook(book: Book, userId: string): Promise<Book | null> {
+    const key = `${userId}:${book.id}`;
+    if (!this.books.has(key)) return null;
+    const updated: Book = {
+      ...this.books.get(key)!,
+      ...book,
+      userId,
+      updatedAt: new Date().toISOString()
+    };
+    this.books.set(key, updated);
+    return updated;
+  }
+
+  async deleteBook(bookId: string, userId: string): Promise<boolean> {
+    return this.books.delete(`${userId}:${bookId}`);
+  }
+}
+
+export class HybridBookRepository implements IBookRepository {
+  private postgres = new PostgresBookRepository();
+  private fallback = new MemoryBookRepository();
+
+  private getActiveRepo(): IBookRepository {
+    return isPostgresConfigured() && db ? this.postgres : this.fallback;
+  }
+
+  async createBook(book: Book, userId: string): Promise<Book> {
+    return this.getActiveRepo().createBook(book, userId);
+  }
+
+  async getBookById(bookId: string, userId: string): Promise<Book | null> {
+    return this.getActiveRepo().getBookById(bookId, userId);
+  }
+
+  async getBooksByUserId(userId: string): Promise<Book[]> {
+    return this.getActiveRepo().getBooksByUserId(userId);
+  }
+
+  async updateBook(book: Book, userId: string): Promise<Book | null> {
+    return this.getActiveRepo().updateBook(book, userId);
+  }
+
+  async deleteBook(bookId: string, userId: string): Promise<boolean> {
+    return this.getActiveRepo().deleteBook(bookId, userId);
+  }
+}
+
+export const bookRepository: IBookRepository = new HybridBookRepository();

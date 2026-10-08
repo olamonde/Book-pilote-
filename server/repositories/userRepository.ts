@@ -193,33 +193,43 @@ const DATA_DIR = path.join(process.cwd(), '.data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 
+const memoryFileCache = new Map<string, any>();
+
 function ensureDataDir() {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+  } catch {}
 }
 
 function readJsonFile<T>(filePath: string, fallback: T): T {
+  if (memoryFileCache.has(filePath)) {
+    return memoryFileCache.get(filePath) as T;
+  }
   try {
     ensureDataDir();
     if (!fs.existsSync(filePath)) {
       return fallback;
     }
     const raw = fs.readFileSync(filePath, 'utf-8');
-    return JSON.parse(raw) as T;
+    const parsed = JSON.parse(raw) as T;
+    memoryFileCache.set(filePath, parsed);
+    return parsed;
   } catch (err) {
     return fallback;
   }
 }
 
 function writeJsonFile<T>(filePath: string, data: T): void {
+  memoryFileCache.set(filePath, data);
   try {
     ensureDataDir();
     const tempPath = `${filePath}.tmp`;
     fs.writeFileSync(tempPath, JSON.stringify(data, null, 2), 'utf-8');
     fs.renameSync(tempPath, filePath);
   } catch (err) {
-    console.error(`[Repository] Error writing ${filePath}:`, err);
+    // In serverless / worker environments without writable disk, in-memory cache is used
   }
 }
 

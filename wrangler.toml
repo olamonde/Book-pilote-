@@ -1,4 +1,4 @@
-name = "book-pilot"
+name = "book-pilote"
 main = "server/worker.ts"
 compatibility_date = "2025-02-01"
 compatibility_flags = ["nodejs_compat"]
