@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { Compass, X, Mail, Lock, User as UserIcon, ArrowRight, CheckCircle2, AlertCircle, Sparkles } from 'lucide-react';
 import { User } from '../../types';
 import { AuthService } from '../../services/authService';
-import { StorageService } from '../../services/storageService';
 import { useTranslation } from '../../i18n';
 
 interface AuthModalProps {
@@ -92,8 +91,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         authenticatedUser = res.user;
       }
 
-      // Synchronize in-memory/fallback cache for offline continuity
-      StorageService.setCurrentUser(authenticatedUser);
       onSuccess(authenticatedUser);
       onClose();
     } catch (err: any) {

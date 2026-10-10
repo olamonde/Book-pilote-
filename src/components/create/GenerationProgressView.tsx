@@ -14,7 +14,6 @@ import {
 } from 'lucide-react';
 import { Book, Chapter } from '../../types';
 import { AIService, BookConcept, OutlineItem } from '../../services/aiService';
-import { StorageService } from '../../services/storageService';
 import { CoverRenderer } from '../cover/CoverRenderer';
 import { useTranslation } from '../../i18n';
 
@@ -152,7 +151,7 @@ export const GenerationProgressView: React.FC<GenerationProgressViewProps> = ({
 
         const newBook: Book = {
           id: `book-${Date.now()}`,
-          userId: StorageService.getCurrentUser()?.id || 'anonymous',
+          userId: '',
           title: concept.title,
           subtitle: concept.subtitle,
           description: concept.description,

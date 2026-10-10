@@ -12,6 +12,7 @@ export interface IUserRepository {
   findById(id: string): Promise<UserAccount | null>;
   create(account: UserAccount): Promise<UserAccount>;
   updateProfile(userId: string, partialProfile: Partial<User>): Promise<UserAccount | null>;
+  updatePassword(userId: string, newPasswordHash: string): Promise<boolean>;
 }
 
 export interface ISessionRepository {
@@ -116,6 +117,16 @@ export class PostgresUserRepository implements IUserRepository {
 
     if (!rows.length) return null;
     return mapUserRowToAccount(rows[0]);
+  }
+
+  async updatePassword(userId: string, newPasswordHash: string): Promise<boolean> {
+    if (!db) return false;
+    const rows = await db
+      .update(usersTable)
+      .set({ passwordHash: newPasswordHash, updatedAt: new Date() })
+      .where(eq(usersTable.id, userId))
+      .returning({ id: usersTable.id });
+    return rows.length > 0;
   }
 }
 
@@ -281,6 +292,18 @@ export class JsonUserRepository implements IUserRepository {
     this.saveUsers(users);
     return user;
   }
+
+  async updatePassword(userId: string, newPasswordHash: string): Promise<boolean> {
+    const users = this.loadUsers();
+    const user = users[userId];
+    if (!user) return false;
+
+    user.passwordHash = newPasswordHash;
+    user.updatedAt = new Date().toISOString();
+    users[userId] = user;
+    this.saveUsers(users);
+    return true;
+  }
 }
 
 export class JsonSessionRepository implements ISessionRepository {
@@ -382,6 +405,10 @@ export class HybridUserRepository implements IUserRepository {
 
   async updateProfile(userId: string, partialProfile: Partial<User>): Promise<UserAccount | null> {
     return this.getActiveRepo().updateProfile(userId, partialProfile);
+  }
+
+  async updatePassword(userId: string, newPasswordHash: string): Promise<boolean> {
+    return this.getActiveRepo().updatePassword(userId, newPasswordHash);
   }
 }
 

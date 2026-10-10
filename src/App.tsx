@@ -1,8 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Compass } from 'lucide-react';
 import { ViewRoute, User, Book, ToastNotification, Plan, CoverConfig } from './types';
 import { StorageService } from './services/storageService';
 import { AuthService } from './services/authService';
+import { BookService } from './services/bookService';
 import { AIService, BookConcept, OutlineItem } from './services/aiService';
 
 // Common Components
@@ -56,9 +57,32 @@ export default function App() {
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [legalModalType, setLegalModalType] = useState<'privacy' | 'terms' | 'cookies' | 'refund' | null>(null);
 
-  // Books State (strictly scoped to authenticated user)
+  // Books State (authoritatively loaded from server PostgreSQL / Neon)
   const [books, setBooks] = useState<Book[]>([]);
   const [currentBook, setCurrentBook] = useState<Book | null>(null);
+  const [booksLoading, setBooksLoading] = useState(false);
+
+  // Load books from PostgreSQL / Neon with single-pass legacy migration if needed
+  const loadUserBooks = useCallback(async (userId: string) => {
+    try {
+      setBooksLoading(true);
+      let serverBooks = await BookService.getBooks();
+      // Safely migrate any legacy localStorage books once
+      serverBooks = await BookService.migrateLegacyLocalStorageBooks(serverBooks, userId);
+      setBooks(serverBooks);
+      setCurrentBook((prev) => {
+        if (prev && serverBooks.some((b) => b.id === prev.id)) {
+          return serverBooks.find((b) => b.id === prev.id) || prev;
+        }
+        return serverBooks.length > 0 ? serverBooks[0] : null;
+      });
+    } catch (err: any) {
+      console.error('[Books] Erreur lors du chargement des livres:', err);
+      addToast(err?.message || 'Impossible de charger vos livres depuis le serveur.', 'error');
+    } finally {
+      setBooksLoading(false);
+    }
+  }, []);
 
   // Initial Server Session Verification on App Startup
   useEffect(() => {
@@ -70,9 +94,7 @@ export default function App() {
           if (currentUser) {
             setUser(currentUser);
             StorageService.setCurrentUser(currentUser);
-            const userBooks = StorageService.getBooks(currentUser.id);
-            setBooks(userBooks);
-            setCurrentBook(userBooks.length > 0 ? userBooks[0] : null);
+            await loadUserBooks(currentUser.id);
           } else {
             setUser(null);
             StorageService.setCurrentUser(null);
@@ -84,6 +106,8 @@ export default function App() {
         console.warn('Failed to verify session on startup:', err);
         if (isMounted) {
           setUser(null);
+          setBooks([]);
+          setCurrentBook(null);
         }
       } finally {
         if (isMounted) {
@@ -96,22 +120,7 @@ export default function App() {
     return () => {
       isMounted = false;
     };
-  }, []);
-
-  // Keep books strictly synchronized with current logged-in user
-  useEffect(() => {
-    if (user?.id) {
-      const userBooks = StorageService.getBooks(user.id);
-      setBooks(userBooks);
-      setCurrentBook((prev) => {
-        if (prev && userBooks.some((b) => b.id === prev.id)) return prev;
-        return userBooks.length > 0 ? userBooks[0] : null;
-      });
-    } else {
-      setBooks([]);
-      setCurrentBook(null);
-    }
-  }, [user?.id]);
+  }, [loadUserBooks]);
 
   // Generation Flow State
   const [initialPromptFromHero, setInitialPromptFromHero] = useState<string>('');
@@ -166,12 +175,22 @@ export default function App() {
   };
 
   // Auth Handlers
-  const handleAuthSuccess = (authenticatedUser: User) => {
+  const refreshUserSession = useCallback(async () => {
+    try {
+      const refreshed = await AuthService.getCurrentUser();
+      if (refreshed) {
+        setUser(refreshed);
+        StorageService.setCurrentUser(refreshed);
+      }
+    } catch (err) {
+      console.warn('[Session] Impossible d\'actualiser la session:', err);
+    }
+  }, []);
+
+  const handleAuthSuccess = async (authenticatedUser: User) => {
     setUser(authenticatedUser);
     StorageService.setCurrentUser(authenticatedUser);
-    const userBooks = StorageService.getBooks(authenticatedUser.id);
-    setBooks(userBooks);
-    setCurrentBook(userBooks.length > 0 ? userBooks[0] : null);
+    await loadUserBooks(authenticatedUser.id);
     addToast(`Bienvenue, ${authenticatedUser.name} !`, 'success', 'Connecté');
 
     if (!authenticatedUser.hasCompletedOnboarding) {
@@ -184,30 +203,25 @@ export default function App() {
     }
   };
 
-  const handleOnboardingComplete = async (selectedPlan: Plan) => {
+  const handleOnboardingComplete = async (_selectedPlan: Plan) => {
     setOnboardingOpen(false);
     if (user) {
-      const limits: Record<Plan, number> = {
-        free: 5,
-        creator: 50,
-        pro: 200
-      };
-      const updatedUser: User = {
-        ...user,
-        plan: selectedPlan,
-        aiGenerationsLimit: limits[selectedPlan] || 5,
-        hasCompletedOnboarding: true
-      };
-      setUser(updatedUser);
-      StorageService.setCurrentUser(updatedUser);
-      AuthService.updateProfile({ hasCompletedOnboarding: true }).catch(() => {});
+      try {
+        const updated = await AuthService.updateProfile({ hasCompletedOnboarding: true });
+        if (updated) {
+          setUser(updated);
+          StorageService.setCurrentUser(updated);
+        }
+      } catch (err) {
+        console.warn('Erreur lors de la finalisation de l\'onboarding:', err);
+      }
 
       if (initialPromptFromHero) {
         navigate('create');
         addToast('Votre livre est prêt à être généré avec votre idée !', 'success');
       } else {
         navigate('dashboard');
-        addToast(`Plan ${selectedPlan.toUpperCase()} activé. Bienvenue sur Book Pilot !`, 'success');
+        addToast('Bienvenue sur Book Pilot !', 'success');
       }
     }
   };
@@ -247,145 +261,98 @@ export default function App() {
     // Keep in 'create' view while GenerationProgressView runs
   };
 
-  const handleGenerationCompleted = (newBook: Book) => {
-    const ownerId = user?.id || StorageService.getCurrentUser()?.id || newBook.userId;
-    const bookWithOwner: Book = {
-      ...newBook,
-      userId: ownerId
-    };
-    // Save new book to library scoped to current user
-    const updatedBooks = StorageService.saveBook(bookWithOwner, ownerId);
-    setBooks(updatedBooks);
-    setCurrentBook(bookWithOwner);
-
-    // Sync latest user AI quota and state from server
-    if (user) {
-      AuthService.getCurrentUser().then((refreshed) => {
-        if (refreshed) {
-          setUser(refreshed);
-          StorageService.setCurrentUser(refreshed);
-        }
-      }).catch(() => {});
+  const handleGenerationCompleted = async (newBook: Book) => {
+    try {
+      const savedBook = await BookService.createBook(newBook);
+      setBooks((prev) => [savedBook, ...prev.filter((b) => b.id !== savedBook.id)]);
+      setCurrentBook(savedBook);
+      addToast(`"${savedBook.title}" a été relié et sauvegardé dans votre bibliothèque !`, 'success');
+    } catch (err: any) {
+      console.error('[Books] Erreur lors de la sauvegarde du livre:', err);
+      addToast(err?.message || 'Erreur lors de la sauvegarde du livre sur le serveur.', 'error');
+    } finally {
+      refreshUserSession();
     }
-
-    addToast(`"${newBook.title}" a été relié et sauvegardé dans votre bibliothèque !`, 'success');
   };
 
-  // Editor and Book CRUD
-  const handleSaveBook = (updatedBook: Book) => {
-    const ownerId = user?.id || updatedBook.userId;
-    const updatedBooks = StorageService.saveBook(updatedBook, ownerId);
-    setBooks(updatedBooks);
-    setCurrentBook(updatedBook);
-
-    // Prepare future cloud backup sync silently
-    fetch('/api/books', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'same-origin',
-      body: JSON.stringify(updatedBook)
-    }).catch(() => {});
+  // Editor and Book CRUD (Server-First via PostgreSQL / Neon)
+  const handleSaveBook = async (updatedBook: Book) => {
+    try {
+      const saved = await BookService.updateBook(updatedBook.id, updatedBook);
+      setBooks((prev) => prev.map((b) => (b.id === saved.id ? saved : b)));
+      setCurrentBook(saved);
+      addToast('Modifications enregistrées sur le serveur.', 'success');
+    } catch (err: any) {
+      console.error('[Books] Erreur lors de la sauvegarde du livre:', err);
+      addToast(err?.message || 'Impossible d\'enregistrer le livre sur le serveur. Veuillez vérifier votre connexion.', 'error');
+    }
   };
 
   const handleTrackAiUsage = () => {
-    if (user) {
-      AuthService.getCurrentUser().then((refreshed) => {
-        if (refreshed) {
-          setUser(refreshed);
-          StorageService.setCurrentUser(refreshed);
-        }
-      }).catch(() => {});
-    }
+    refreshUserSession();
   };
 
   const handleRefundAiUsage = () => {
-    if (user) {
-      AuthService.getCurrentUser().then((refreshed) => {
-        if (refreshed) {
-          setUser(refreshed);
-          StorageService.setCurrentUser(refreshed);
-        }
-      }).catch(() => {});
+    refreshUserSession();
+  };
+
+  const handleDuplicateBook = async (bookId: string) => {
+    try {
+      const duplicated = await BookService.duplicateBook(bookId);
+      setBooks((prev) => [duplicated, ...prev]);
+      addToast(`Dupliqué "${duplicated.title}".`, 'success');
+    } catch (err: any) {
+      console.error('[Books] Erreur lors de la duplication du livre:', err);
+      addToast(err?.message || 'Impossible de dupliquer le livre sur le serveur.', 'error');
     }
   };
 
-  const handleDuplicateBook = (bookId: string) => {
-    const target = books.find((b) => b.id === bookId);
-    if (!target) return;
-
-    const ownerId = user?.id || target.userId;
-    const duplicated: Book = {
-      ...target,
-      id: `book-${Date.now()}`,
-      userId: ownerId,
-      title: `${target.title} (Copy)`,
-      status: 'draft',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    };
-
-    const updated = StorageService.saveBook(duplicated, ownerId);
-    setBooks(updated);
-    addToast(`Dupliqué "${target.title}".`, 'success');
-  };
-
-  const handleRenameBook = (bookId: string) => {
+  const handleRenameBook = async (bookId: string) => {
     const target = books.find((b) => b.id === bookId);
     if (!target) return;
 
     const newTitle = prompt('Entrez le nouveau titre du livre :', target.title);
     if (newTitle && newTitle.trim()) {
-      const ownerId = user?.id || target.userId;
-      const updatedBook: Book = {
-        ...target,
-        title: newTitle.trim(),
-        cover: {
-          ...target.cover,
-          title: newTitle.trim()
-        },
-        updatedAt: new Date().toISOString()
-      };
-      const updatedList = StorageService.saveBook(updatedBook, ownerId);
-      setBooks(updatedList);
-      if (currentBook?.id === bookId) setCurrentBook(updatedBook);
-      addToast('Livre renommé avec succès.', 'success');
-    }
-  };
-
-  const handleDeleteBook = (bookId: string) => {
-    if (window.confirm('Voulez-vous vraiment supprimer définitivement ce projet de livre ?')) {
-      const updated = StorageService.deleteBook(bookId, user?.id);
-      setBooks(updated);
-      if (currentBook?.id === bookId) {
-        setCurrentBook(updated.length > 0 ? updated[0] : null);
+      try {
+        const updated = await BookService.renameBook(bookId, newTitle.trim(), target.cover);
+        setBooks((prev) => prev.map((b) => (b.id === updated.id ? updated : b)));
+        if (currentBook?.id === bookId) {
+          setCurrentBook(updated);
+        }
+        addToast('Livre renommé avec succès.', 'success');
+      } catch (err: any) {
+        console.error('[Books] Erreur lors du renommage du livre:', err);
+        addToast(err?.message || 'Impossible de renommer le livre.', 'error');
       }
-      addToast('Projet supprimé de votre bibliothèque.', 'info');
     }
   };
 
-  // Plan Upgrade
-  const handleUpgradePlan = (newPlan: Plan, cycle: 'monthly' | 'yearly') => {
+  const handleDeleteBook = async (bookId: string) => {
+    if (window.confirm('Voulez-vous vraiment supprimer définitivement ce projet de livre ?')) {
+      try {
+        await BookService.deleteBook(bookId);
+        setBooks((prev) => {
+          const updated = prev.filter((b) => b.id !== bookId);
+          if (currentBook?.id === bookId) {
+            setCurrentBook(updated.length > 0 ? updated[0] : null);
+          }
+          return updated;
+        });
+        addToast('Projet supprimé de votre bibliothèque.', 'info');
+      } catch (err: any) {
+        console.error('[Books] Erreur lors de la suppression du livre:', err);
+        addToast(err?.message || 'Impossible de supprimer le livre sur le serveur.', 'error');
+      }
+    }
+  };
+
+  // Plan Upgrade (Server-Authoritative - Payment integration pending)
+  const handleUpgradePlan = (_newPlan: Plan, _cycle: 'monthly' | 'yearly') => {
     if (!user) {
       setAuthModal({ isOpen: true, mode: 'signup' });
       return;
     }
-
-    const limits: Record<Plan, number> = {
-      free: 5,
-      creator: 50,
-      pro: 200
-    };
-
-    const updatedUser: User = {
-      ...user,
-      plan: newPlan,
-      billingCycle: cycle,
-      aiGenerationsLimit: limits[newPlan]
-    };
-
-    StorageService.setCurrentUser(updatedUser);
-    setUser(updatedUser);
-    addToast(`Upgraded to ${newPlan.toUpperCase()} tier! Quotas updated.`, 'success');
+    addToast('Le module de souscription et paiement en ligne sera disponible prochainement.', 'info');
   };
 
   // Determine whether current route is in studio mode (with sidebar & topbar)
@@ -574,14 +541,24 @@ export default function App() {
               {currentRoute === 'settings' && (
                 <SettingsView
                   user={user}
-                  onUpdateUser={(updated) => {
+                  onUpdateUser={async (updated) => {
                     setUser(updated);
                     StorageService.setCurrentUser(updated);
-                    AuthService.updateProfile({
-                      name: updated.name,
-                      defaultContentLanguage: updated.defaultContentLanguage,
-                      interfaceLanguage: updated.interfaceLanguage
-                    }).catch(() => {});
+                    try {
+                      const serverUser = await AuthService.updateProfile({
+                        name: updated.name,
+                        defaultContentLanguage: updated.defaultContentLanguage,
+                        interfaceLanguage: updated.interfaceLanguage
+                      });
+                      if (serverUser) {
+                        setUser(serverUser);
+                        StorageService.setCurrentUser(serverUser);
+                      }
+                      addToast('Profil synchronisé avec succès.', 'success');
+                    } catch (err: any) {
+                      console.error('[Settings] Erreur de mise à jour du profil:', err);
+                      addToast('Impossible de synchroniser le profil avec le serveur.', 'error');
+                    }
                   }}
                   onShowToast={addToast}
                 />

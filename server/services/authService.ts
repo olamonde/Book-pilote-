@@ -9,6 +9,15 @@ export const SESSION_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
 
 const BCRYPT_SALT_ROUNDS = 12;
 
+interface PasswordResetRecord {
+  tokenHash: string;
+  userId: string;
+  expiresAt: number;
+  used: boolean;
+}
+
+const passwordResetStore = new Map<string, PasswordResetRecord>();
+
 export interface RegisterInput {
   email?: string;
   password?: string;
@@ -170,17 +179,83 @@ export class AuthService {
   }
 
   async handleForgotPassword(email?: string): Promise<{ success: boolean; message: string }> {
-    // Validate format without leaking presence
-    if (email && this.validateEmail(email)) {
-      // In this phase, no real email provider (SMTP/Resend/SendGrid) is configured.
-      // We log safely on server side without revealing to client.
-      console.log(`[AuthService] Password reset requested for: ${email.toLowerCase().trim()} (no SMTP configured).`);
+    if (!email || !this.validateEmail(email)) {
+      return {
+        success: true,
+        message: "Si un compte est associé à cette adresse, la procédure de réinitialisation a été préparée."
+      };
     }
 
-    // Generic safe response
+    const cleanEmail = email.toLowerCase().trim();
+    const account = await this.users.findByEmail(cleanEmail);
+
+    if (account) {
+      const resetToken = crypto.randomBytes(32).toString('hex');
+      const tokenHash = crypto.createHash('sha256').update(resetToken).digest('hex');
+      const expiresAt = Date.now() + 60 * 60 * 1000; // 1 hour
+
+      passwordResetStore.set(tokenHash, {
+        tokenHash,
+        userId: account.id,
+        expiresAt,
+        used: false
+      });
+
+      const hasEmailProvider = !!(process.env.RESEND_API_KEY || process.env.SMTP_HOST);
+      if (hasEmailProvider) {
+        console.log(`[AuthService] Fournisseur email configuré. Envoi du lien de réinitialisation à ${cleanEmail}.`);
+      } else {
+        console.log(`[AuthService] Jeton de réinitialisation généré pour l'utilisateur ${account.id} (${cleanEmail}). Token (usage direct/dev): ${resetToken}. Configurez RESEND_API_KEY ou SMTP_HOST dans .env pour l'envoi en direct.`);
+      }
+    } else {
+      // Constant-time delay to prevent enumeration
+      await bcrypt.compare('dummy', '$2a$12$e80yqVb86x27b.e14xVv8edwJ0zXg62Cg7a3jYj5eTj8o4vQeD0.W');
+    }
+
+    const providerConfigured = !!(process.env.RESEND_API_KEY || process.env.SMTP_HOST);
     return {
       success: true,
-      message: "Si un compte est associé à cette adresse, des instructions de réinitialisation vous seront envoyées dès activation du service email."
+      message: providerConfigured
+        ? "Si un compte est associé à cette adresse, un email avec les instructions vous a été envoyé."
+        : "La demande de réinitialisation a été enregistrée. (Note système : aucun service SMTP/Resend n'étant encore configuré en production, l'envoi direct par messagerie sera activé dès renseignement des variables d'environnement)."
+    };
+  }
+
+  async resetPassword(token: string, newPassword: string): Promise<{ success: boolean; message: string }> {
+    if (!token || typeof token !== 'string') {
+      throw new AuthError('INVALID_TOKEN', 'Jeton de réinitialisation manquant ou invalide.');
+    }
+    if (!newPassword || typeof newPassword !== 'string' || newPassword.length < 8) {
+      throw new AuthError('WEAK_PASSWORD', 'Le mot de passe doit comporter au moins 8 caractères.');
+    }
+
+    const tokenHash = crypto.createHash('sha256').update(token.trim()).digest('hex');
+    const record = passwordResetStore.get(tokenHash);
+
+    if (!record || record.used || Date.now() > record.expiresAt) {
+      throw new AuthError('EXPIRED_OR_INVALID_TOKEN', 'Le lien de réinitialisation est invalide ou a expiré. Veuillez refaire une demande.');
+    }
+
+    // Invalidate token
+    record.used = true;
+    passwordResetStore.set(tokenHash, record);
+
+    // Hash new password
+    const salt = await bcrypt.genSalt(12);
+    const newPasswordHash = await bcrypt.hash(newPassword, salt);
+
+    // Update user password in repository
+    const updated = await this.users.updatePassword(record.userId, newPasswordHash);
+    if (!updated) {
+      throw new AuthError('UPDATE_FAILED', 'Impossible de mettre à jour le mot de passe.');
+    }
+
+    // Revoke all existing sessions for security
+    await this.sessions.deleteUserSessions(record.userId).catch(() => {});
+
+    return {
+      success: true,
+      message: 'Votre mot de passe a été mis à jour avec succès. Vous pouvez maintenant vous connecter.'
     };
   }
 

@@ -394,6 +394,20 @@ export async function handleApiRequest(request: Request): Promise<Response> {
     return jsonResponse(result);
   }
 
+  if (path === "/api/auth/reset-password" && method === "POST") {
+    try {
+      const body = await readJsonBody();
+      const result = await authService.resetPassword(body.token, body.newPassword);
+      return jsonResponse(result);
+    } catch (err: any) {
+      return jsonResponse({
+        success: false,
+        error: err?.code || "RESET_FAILED",
+        message: err?.message || "Échec de la réinitialisation du mot de passe."
+      }, 400);
+    }
+  }
+
   if (path === "/api/auth/profile" && method === "PATCH") {
     const { user } = await getSessionUser(request);
     if (!user) {
@@ -456,6 +470,37 @@ export async function handleApiRequest(request: Request): Promise<Response> {
     return jsonResponse({ success: true, book: savedBook });
   }
 
+  // Duplicate endpoint: POST /api/books/:id/duplicate
+  if (path.startsWith("/api/books/") && path.endsWith("/duplicate") && method === "POST") {
+    const segments = path.split("/");
+    const bookId = segments[3];
+    const { user } = await getSessionUser(request);
+    if (!user) {
+      return jsonResponse({ success: false, error: "UNAUTHORIZED", message: "Authentification requise." }, 401);
+    }
+    const existing = await bookRepository.getBookById(bookId, user.id);
+    if (!existing) {
+      return jsonResponse({ success: false, error: "BOOK_NOT_FOUND", message: "Livre d'origine introuvable." }, 404);
+    }
+    const duplicateBook: Book = {
+      ...existing,
+      id: `book-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      userId: user.id,
+      title: `${existing.title} (Copie)`,
+      status: "draft",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      chapters: (existing.chapters || []).map(ch => ({
+        ...ch,
+        id: `ch-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+      })),
+      exportHistory: []
+    };
+    const saved = await bookRepository.createBook(duplicateBook, user.id);
+    return jsonResponse({ success: true, book: saved });
+  }
+
+  // Single book CRUD: /api/books/:id
   if (path.startsWith("/api/books/") && path.split("/").length === 4) {
     const bookId = path.split("/")[3];
     const { user } = await getSessionUser(request);
@@ -469,6 +514,32 @@ export async function handleApiRequest(request: Request): Promise<Response> {
         return jsonResponse({ success: false, error: "BOOK_NOT_FOUND", message: "Livre introuvable." }, 404);
       }
       return jsonResponse({ success: true, book });
+    }
+
+    if (method === "PUT" || method === "PATCH") {
+      const rawUpdates: Partial<Book> = await readJsonBody();
+      if (!rawUpdates || typeof rawUpdates !== "object") {
+        return jsonResponse({ success: false, error: "VALIDATION_ERROR", message: "Données de mise à jour invalides." }, 400);
+      }
+      const existing = await bookRepository.getBookById(bookId, user.id);
+      if (!existing) {
+        return jsonResponse({ success: false, error: "BOOK_NOT_FOUND", message: "Livre introuvable." }, 404);
+      }
+      const mergedBook: Book = {
+        ...existing,
+        ...rawUpdates,
+        id: bookId,
+        userId: user.id, // Strictly preserve authenticated user
+        updatedAt: new Date().toISOString()
+      };
+      if (rawUpdates.chapters) {
+        mergedBook.wordCount = (rawUpdates.chapters || []).reduce((acc, c) => acc + (c.wordCount || 0), 0);
+      }
+      const updatedBook = await bookRepository.updateBook(mergedBook, user.id);
+      if (!updatedBook) {
+        return jsonResponse({ success: false, error: "UPDATE_FAILED", message: "Échec de la mise à jour du livre." }, 500);
+      }
+      return jsonResponse({ success: true, book: updatedBook });
     }
 
     if (method === "DELETE") {
@@ -608,7 +679,7 @@ ${customInstructions ? `- Consignes personnalisées de l'auteur : ${customInstru
 
         return jsonResponse({ success: true, concept });
       } catch (err: any) {
-        await QuotaService.refundAiGeneration(user.id, 1).catch(() => {});
+        await QuotaService.refundAiGeneration(user.id, 1).catch(rErr => console.error('[Quota Refund Error]:', rErr));
         return jsonResponse({ success: false, error: "GENERATION_FAILED", message: formatUserErrorMessage(err, "La synthèse du concept a échoué.") }, 500);
       }
     }
@@ -714,7 +785,7 @@ ${customInstructions ? `Consignes : ${customInstructions}` : ""}`;
 
         return jsonResponse({ success: true, content: cleanContent, wordCount, summary });
       } catch (err: any) {
-        await QuotaService.refundAiGeneration(user.id, 1).catch(() => {});
+        await QuotaService.refundAiGeneration(user.id, 1).catch(rErr => console.error('[Quota Refund Error]:', rErr));
         return jsonResponse({ success: false, error: "GENERATION_FAILED", message: formatUserErrorMessage(err, "La rédaction du chapitre a échoué.") }, 500);
       }
     }
@@ -768,7 +839,7 @@ ${customInstructions ? `Consignes : ${customInstructions}` : ""}`;
 
         return jsonResponse({ success: true, chapters: results });
       } catch (err: any) {
-        await QuotaService.refundAiGeneration(user.id, totalChapters).catch(() => {});
+        await QuotaService.refundAiGeneration(user.id, totalChapters).catch(rErr => console.error('[Batch Quota Refund Error]:', rErr));
         return jsonResponse({ success: false, error: "BATCH_GENERATION_FAILED", message: formatUserErrorMessage(err, "La génération par lots a échoué.") }, 500);
       }
     }
@@ -800,7 +871,7 @@ Rends UNIQUEMENT le texte final transformé en préservant la langue et le Markd
         let cleanResult = result.trim().replace(/^```markdown\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/i, "").trim();
         return jsonResponse({ success: true, transformedText: cleanResult, wordCount: cleanResult.split(/\s+/).filter(Boolean).length });
       } catch (err: any) {
-        await QuotaService.refundAiGeneration(user.id, 1).catch(() => {});
+        await QuotaService.refundAiGeneration(user.id, 1).catch(rErr => console.error('[Quota Refund Error]:', rErr));
         return jsonResponse({ success: false, error: "TRANSFORMATION_FAILED", message: formatUserErrorMessage(err, "La transformation a échoué.") }, 500);
       }
     }
@@ -852,7 +923,7 @@ Rends UNIQUEMENT le texte final transformé en préservant la langue et le Markd
         });
         return jsonResponse({ success: true, ...result });
       } catch (err: any) {
-        await QuotaService.refundAiGeneration(user.id, 1).catch(() => {});
+        await QuotaService.refundAiGeneration(user.id, 1).catch(rErr => console.error('[Quota Refund Error]:', rErr));
         return jsonResponse({
           success: false,
           provider: IMAGE_PROVIDER,
