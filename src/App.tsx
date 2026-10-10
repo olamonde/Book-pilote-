@@ -17,7 +17,6 @@ import { Navbar } from './components/landing/Navbar';
 import { Hero } from './components/landing/Hero';
 import { HowItWorks } from './components/landing/HowItWorks';
 import { Features } from './components/landing/Features';
-import { Showcase } from './components/landing/Showcase';
 import { PricingSection } from './components/landing/PricingSection';
 import { FAQSection } from './components/landing/FAQSection';
 import { Footer } from './components/landing/Footer';
@@ -418,11 +417,6 @@ export default function App() {
             <Hero onStartGeneration={handleStartFromHero} />
             <HowItWorks />
             <Features />
-            <Showcase
-              onSelectBookTemplate={(item) => {
-                handleStartFromHero(item.description);
-              }}
-            />
             <PricingSection
               currentUser={user || undefined}
               onSelectPlan={(plan, cycle) => handleUpgradePlan(plan, cycle)}
